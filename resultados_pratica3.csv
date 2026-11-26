@@ -1,0 +1,15 @@
+﻿politica,cenario,id_transacao,valor_reais,status,lider,confirmacoes,minimo_exigido,detalhe
+unanimidade,normal,P001,10.00,CONFIRMADA,N0,5,5,Confirmações: 5/5 (exigidas: 5).
+unanimidade,um_servidor_fora,P002,20.00,REJEITADA_SEM_QUORUM,nenhum,0,5,Não há grupo acessível com confirmações suficientes.
+unanimidade,particao_2_3,P003,30.00,REJEITADA_SEM_QUORUM,nenhum,0,5,Não há grupo acessível com confirmações suficientes.
+unanimidade,particao_2_2_1,P004,40.00,REJEITADA_SEM_QUORUM,nenhum,0,5,Não há grupo acessível com confirmações suficientes.
+unanimidade,rede_restaurada,P005,50.00,CONFIRMADA,N0,5,5,Confirmações: 5/5 (exigidas: 5).
+unanimidade,duplicada,P005,50.00,DUPLICADA_SEM_COBRANCA,N0,5,5,A operação já estava confirmada: não somar novamente.
+unanimidade,falha_lider,P006,60.00,REJEITADA_SEM_QUORUM,nenhum,0,5,Não há grupo acessível com confirmações suficientes.
+maioria,normal,P001,10.00,CONFIRMADA,N0,5,3,Confirmações: 5/5 (exigidas: 3).
+maioria,um_servidor_fora,P002,20.00,CONFIRMADA,N0,4,3,Confirmações: 4/5 (exigidas: 3).
+maioria,particao_2_3,P003,30.00,CONFIRMADA,N2,3,3,Confirmações: 3/5 (exigidas: 3).
+maioria,particao_2_2_1,P004,40.00,REJEITADA_SEM_QUORUM,nenhum,0,3,Não há grupo acessível com confirmações suficientes.
+maioria,rede_restaurada,P005,50.00,CONFIRMADA,N2,5,3,Confirmações: 5/5 (exigidas: 3).
+maioria,duplicada,P005,50.00,DUPLICADA_SEM_COBRANCA,N2,5,3,A operação já estava confirmada: não somar novamente.
+maioria,falha_lider,P006,60.00,CONFIRMADA,N0,4,3,Confirmações: 4/5 (exigidas: 3).

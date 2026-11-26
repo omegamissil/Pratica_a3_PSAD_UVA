@@ -1,0 +1,283 @@
+"""
+PRÁTICA 3 — CONSENSO DISTRIBUÍDO EM PAGAMENTOS (SIMULAÇÃO DIDÁTICA)
+
+Um único programa independente para comparar dois critérios de confirmação:
+- UNANIMIDADE: todos os 5 nós precisam responder;
+- MAIORIA: pelo menos 3 dos 5 nós precisam responder (quórum).
+
+Cenários: operação normal, falha de servidor, timeout de heartbeat, partição
+2+3, partição 2+2+1, recuperação, duplicidade/idempotência e falha do líder.
+
+IMPORTANTE: simulador de eventos em um processo Python, NÃO é Raft/Paxos,
+não executa comunicação real via rede e NÃO processa pagamentos reais.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Transacao:
+    """Registro imutável de um pagamento confirmado (valores em centavos)."""
+    identificador: str
+    conta: str
+    centavos: int
+
+
+@dataclass
+class No:
+    """Representa um servidor e sua cópia local do registro de pagamentos."""
+    numero: int
+    online: bool = True
+    log: list[Transacao] = field(default_factory=list)
+
+    @property
+    def total_centavos(self) -> int:
+        return sum(item.centavos for item in self.log)
+
+
+class Cluster:
+    """Controlador central da simulação; não representa um protocolo real."""
+
+    def __init__(self, politica: str, quantidade: int = 5):
+        if quantidade != 5:
+            raise ValueError("Os cenários da aula foram preparados para 5 nós.")
+        if politica not in ("unanimidade", "maioria"):
+            raise ValueError("Política inválida.")
+        self.politica = politica
+        self.nos = [No(i) for i in range(quantidade)]
+        self.grupos = [set(range(quantidade))]
+        self.lider: int | None = 0
+        self.tempo = 0
+        self.historico: list[dict[str, object]] = []
+
+    @property
+    def necessario(self) -> int:
+        if self.politica == "unanimidade":
+            return len(self.nos)
+        return len(self.nos) // 2 + 1
+
+    def nome_do_lider(self) -> str:
+        return f"N{self.lider}" if self.lider is not None else "nenhum"
+
+    def definir_falha(self, numero: int, falhou: bool) -> None:
+        self.nos[numero].online = not falhou
+        situacao = "FALHOU" if falhou else "RECUPEROU"
+        print(f"  [FALHA] N{numero}: {situacao}")
+
+    def particionar(self, grupos: list[list[int]]) -> None:
+        encontrados = [n for g in grupos for n in g]
+        if sorted(encontrados) != list(range(len(self.nos))):
+            raise ValueError("Os grupos devem conter todos os nós, sem repetições.")
+        self.grupos = [set(g) for g in grupos]
+        descricao = " / ".join("{" + ",".join(f"N{x}" for x in sorted(g)) + "}" for g in self.grupos)
+        print(f"  [REDE] Partições: {descricao}")
+
+    def grupo_de(self, numero: int) -> set[int]:
+        return next(g for g in self.grupos if numero in g)
+
+    def observaveis(self, observador: int) -> set[int]:
+        """Nós acessíveis por mensagens ao observador, incluindo ele mesmo."""
+        if not self.nos[observador].online:
+            return set()
+        return {n for n in self.grupo_de(observador) if self.nos[n].online}
+
+    def heartbeat(self, observador: int = 0, timeout: int = 3) -> list[int]:
+        """Simula heartbeats em um relógio lógico e indica SUSPEITOS.
+
+        A falta de resposta é suspeita, não prova uma queda: pode ser rede.
+        """
+        ultima_resposta = {n.numero: self.tempo for n in self.nos}
+        for _ in range(timeout):
+            self.tempo += 1
+            acessiveis = self.observaveis(observador)
+            for numero in acessiveis:
+                ultima_resposta[numero] = self.tempo
+        suspeitos = [n.numero for n in self.nos
+                     if self.tempo - ultima_resposta[n.numero] >= timeout]
+        print(f"  [HEARTBEAT] Do ponto de vista de N{observador}: "
+              f"suspeitos de falha/isolamento = {[f'N{i}' for i in suspeitos]}")
+        return suspeitos
+
+    def eleger_lider(self) -> set[int]:
+        """Escolhe o nó com log confirmado mais atualizado em um grupo apto.
+
+        Simplificação didática: um supervisor da simulação conhece as partições.
+        Não há votação real, termos ou mensagens de eleição como no Raft.
+        """
+        elegiveis: list[tuple[set[int], list[int]]] = []
+        for grupo in self.grupos:
+            ativos = sorted(n for n in grupo if self.nos[n].online)
+            if len(ativos) >= self.necessario:
+                elegiveis.append((set(ativos), ativos))
+        if not elegiveis:
+            self.lider = None
+            return set()
+        # Para 5 nós, só pode haver um grupo disjunto com maioria.
+        participantes, candidatos = max(elegiveis, key=lambda par: len(par[1]))
+        melhor_tamanho = max(len(self.nos[n].log) for n in candidatos)
+        mais_atualizados = [n for n in candidatos if len(self.nos[n].log) == melhor_tamanho]
+        escolhido = self.lider if self.lider in mais_atualizados else min(mais_atualizados)
+        if escolhido != self.lider:
+            print(f"  [LÍDER] Eleição simplificada: {self.nome_do_lider()} -> N{escolhido}")
+        self.lider = escolhido
+        return participantes
+
+    def sincronizar(self) -> None:
+        """Copia o log confirmado do líder para os nós acessíveis a ele."""
+        participantes = self.eleger_lider()
+        if self.lider is None:
+            print("  [REPLICAÇÃO] Sem quórum: sincronização adiada.")
+            return
+        referencia = list(self.nos[self.lider].log)
+        for numero in sorted(participantes):
+            if self.nos[numero].log != referencia:
+                self.nos[numero].log = list(referencia)
+                print(f"  [RECUPERAÇÃO] N{numero} atualizado: {len(referencia)} pagamentos.")
+
+    def processar(self, cenario: str, identificador: str, centavos: int,
+                  conta: str = "CLIENTE_A") -> str:
+        """Confirma atomicamente na simulação se há confirmações suficientes.
+
+        Não são modelados log pendente, mensagens perdidas após ACK ou disco.
+        """
+        if centavos <= 0:
+            raise ValueError("O valor deve ser positivo.")
+        participantes = self.eleger_lider()
+        acks = len(participantes)
+        if self.lider is None:
+            status = "REJEITADA_SEM_QUORUM"
+            detalhe = "Não há grupo acessível com confirmações suficientes."
+        else:
+            # Primeiro sincronizamos os participantes acessíveis.
+            self.sincronizar()
+            lider_no = self.nos[self.lider]
+            anterior = next((x for x in lider_no.log if x.identificador == identificador), None)
+            if anterior is not None:
+                if (anterior.centavos, anterior.conta) != (centavos, conta):
+                    status = "REJEITADA_ID_CONFLITANTE"
+                    detalhe = "Mesmo ID de transação com dados diferentes."
+                else:
+                    status = "DUPLICADA_SEM_COBRANCA"
+                    detalhe = "A operação já estava confirmada: não somar novamente."
+            else:
+                item = Transacao(identificador, conta, centavos)
+                # Escrita atômica do simulador, apenas após checar o quórum.
+                for numero in participantes:
+                    self.nos[numero].log.append(item)
+                status = "CONFIRMADA"
+                detalhe = f"Confirmações: {acks}/{len(self.nos)} (exigidas: {self.necessario})."
+        print(f"  [PAGAMENTO] {identificador} = R$ {centavos/100:.2f}: {status}; "
+              f"líder={self.nome_do_lider()}; {detalhe}")
+        self.historico.append({
+            "politica": self.politica,
+            "cenario": cenario,
+            "id_transacao": identificador,
+            "valor_reais": f"{centavos/100:.2f}",
+            "status": status,
+            "lider": self.nome_do_lider(),
+            "confirmacoes": acks,
+            "minimo_exigido": self.necessario,
+            "detalhe": detalhe,
+        })
+        return status
+
+    def validar(self) -> None:
+        """Verifica unicidade dos pagamentos nos logs e convergência após cura."""
+        for servidor in self.nos:
+            ids = [x.identificador for x in servidor.log]
+            assert len(ids) == len(set(ids)), f"Pagamento duplicado em N{servidor.numero}"
+        self.sincronizar()
+        logs = [no.log for no in self.nos]
+        assert all(log == logs[0] for log in logs), "Réplicas divergentes após recuperação."
+        print(f"  [VALIDAÇÃO] 5 logs iguais; {len(logs[0])} pagamentos; "
+              f"total = R$ {self.nos[0].total_centavos/100:.2f}")
+
+
+def executar_cenarios(politica: str) -> tuple[Cluster, dict[str, str]]:
+    """Executa a mesma sequência de falhas para cada política de confirmação."""
+    c = Cluster(politica)
+    estados: dict[str, str] = {}
+    print(f"\n{'='*68}\nPOLÍTICA: {politica.upper()} | 5 NÓS | LIMIAR: {c.necessario}\n{'='*68}")
+
+    print("\n1) OPERAÇÃO NORMAL")
+    estados["normal"] = c.processar("normal", "P001", 1000)
+
+    print("\n2) QUEDA DE UM SERVIDOR + DETECÇÃO POR HEARTBEAT")
+    c.definir_falha(4, True)
+    c.heartbeat(observador=0)
+    estados["um_servidor_fora"] = c.processar("um_servidor_fora", "P002", 2000)
+
+    print("\n3) SERVIDOR RECUPERADO")
+    c.definir_falha(4, False)
+    c.sincronizar()
+
+    print("\n4) PARTIÇÃO DE REDE 2 + 3 (LÍDER ORIGINAL NA MINORIA)")
+    c.particionar([[0, 1], [2, 3, 4]])
+    c.heartbeat(observador=0)
+    estados["particao_2_3"] = c.processar("particao_2_3", "P003", 3000)
+
+    print("\n5) PARTIÇÃO 2 + 2 + 1 (NENHUM GRUPO TEM MAIORIA)")
+    c.particionar([[0, 1], [2, 3], [4]])
+    estados["particao_2_2_1"] = c.processar("particao_2_2_1", "P004", 4000)
+
+    print("\n6) REDE RESTAURADA + SINCRONIZAÇÃO")
+    c.particionar([[0, 1, 2, 3, 4]])
+    c.sincronizar()
+    estados["rede_restaurada"] = c.processar("rede_restaurada", "P005", 5000)
+
+    print("\n7) RETENTATIVA DO MESMO PAGAMENTO (IDEMPOTÊNCIA)")
+    estados["duplicada"] = c.processar("duplicada", "P005", 5000)
+
+    print("\n8) FALHA DO LÍDER E NOVA ELEIÇÃO SIMPLIFICADA")
+    lider_antigo = c.lider
+    assert lider_antigo is not None
+    c.definir_falha(lider_antigo, True)
+    estados["falha_lider"] = c.processar("falha_lider", "P006", 6000)
+    c.definir_falha(lider_antigo, False)
+    c.sincronizar()
+
+    print("\n9) VERIFICAR SE AS RÉPLICAS CONVERGIRAM")
+    c.validar()
+    return c, estados
+
+
+def salvar_csv(clusters: list[Cluster], destino: Path) -> None:
+    """Cria arquivo de resultados para a tabela e os gráficos do relatório."""
+    destino.mkdir(parents=True, exist_ok=True)
+    caminho = destino / "resultados_pratica3.csv"
+    linhas = [item for cluster in clusters for item in cluster.historico]
+    with caminho.open("w", newline="", encoding="utf-8-sig") as arquivo:
+        escritor = csv.DictWriter(arquivo, fieldnames=list(linhas[0]))
+        escritor.writeheader()
+        escritor.writerows(linhas)
+    print(f"\nArquivo CSV salvo em: {caminho.resolve()}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Simulador didático de consenso e pagamentos.")
+    parser.add_argument("--politica", choices=["ambas", "unanimidade", "maioria"],
+                        default="ambas", help="Estratégia de confirmação.")
+    parser.add_argument("--saida", default="resultados", help="Pasta do CSV.")
+    args = parser.parse_args()
+    politicas = ["unanimidade", "maioria"] if args.politica == "ambas" else [args.politica]
+    clusters = []
+    resultados = {}
+    for politica in politicas:
+        cluster, estados = executar_cenarios(politica)
+        clusters.append(cluster)
+        resultados[politica] = estados
+    salvar_csv(clusters, Path(args.saida))
+    if len(politicas) == 2:
+        print("\nCOMPARATIVO FINAL (mesmos cenários, políticas diferentes)")
+        print(f"{'Cenário':<23} {'Unanimidade':<29} {'Maioria'}")
+        for nome in resultados["unanimidade"]:
+            print(f"{nome:<23} {resultados['unanimidade'][nome]:<29} {resultados['maioria'][nome]}")
+    print("\nATENÇÃO: consenso simplificado, sem comunicação de rede real ou Raft/Paxos.")
+
+
+if __name__ == "__main__":
+    main()
